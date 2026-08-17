@@ -1,26 +1,28 @@
-# Piper TTS engine service.
-#
-# Installs the prebuilt piper-tts wheel rather than compiling libpiper/espeak-ng
-# from source. Upstream's own Dockerfile builds from source, which produces the
-# identical wheel but costs ~10min of saturated CPU per deploy — unacceptable on
-# a host shared with production services.
+# Bible TTS API.
 FROM python:3.12-slim
 
-ARG PIPER_VERSION=1.7.0
+# ffmpeg transcodes generated WAV into AAC/M4A for delivery.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# [http] pulls in Flask, which serves /synthesize, /voices and /info.
-RUN pip install --no-cache-dir "piper-tts[http]==${PIPER_VERSION}"
+WORKDIR /app
 
-# Voices are NOT baked into the image: they are large, some carry restrictive
-# licenses, and baking them would rebuild the image on every voice change.
-# The entrypoint populates /data (a persistent volume) on first boot.
-ENV PIPER_DATA_DIR=/data \
-    PIPER_VOICES="en_US-lessac-medium" \
-    PIPER_PORT=5000
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY app/ ./app/
+COPY data/ ./data/
 
-EXPOSE 5000
+# Runs unprivileged. The audio volume is chowned in compose-managed storage.
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /data/audio \
+    && chown -R appuser:appuser /data /app
+USER appuser
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 8080
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

@@ -1,38 +1,53 @@
 # bible-tts
 
-Self-hosted [Piper](https://github.com/OHF-Voice/piper1-gpl) text-to-speech backend for a Bible
-mobile app. Deployed to a Coolify-managed VPS behind Cloudflare at `tts.b5internet.com`.
+Self-hosted text-to-speech backend for a Bible mobile app. FastAPI in front of a
+[Piper](https://github.com/OHF-Voice/piper1-gpl) engine, deployed to a Coolify-managed VPS behind
+Cloudflare at `tts.b5internet.com`.
 
 ## Status
 
 | Component | State |
 |---|---|
-| Piper engine service (this repo) | in progress |
-| FastAPI API layer | not started |
-| Bible text database | not started |
+| Piper engine | deployed (separate Coolify resource, from the `piper1-gpl` fork) |
+| FastAPI API (this repo) | built, tested |
+| Bible text | sample JSON; database phase pending |
+| Pre-generated chapter audio | pending |
 | Android client | not started |
+
+## API
+
+All endpoints except `/health` require an `X-API-Key` header.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | liveness; reports engine reachability, ffmpeg, cached file count |
+| `GET /api/v1/voices` | configured language→voice map vs. what the engine has loaded |
+| `POST /api/v1/tts` | arbitrary text → WAV. Capped at 600 chars |
+| `GET /api/v1/bible/audio/{lang}/{book}/{chapter}` | chapter audio, with range support |
+| `GET /api/v1/bible/audio/status/{lang}/{book}/{chapter}` | `READY` / `GENERATING` / `FAILED` |
+| `GET /api/v1/bible/text/{lang}/{book}/{chapter}` | the verses behind a chapter |
+
+Chapter endpoints accept `?translation=` and otherwise fall back to `DEFAULT_TRANSLATIONS`.
 
 ## Architecture
 
 Chapter audio is **pre-generated**, not synthesized on demand. Bible chapters are a closed set
 (1,189 per translation × voice) with fixed text and a fixed voice, so the output is finite and
-deterministic. Generating it once and serving static files removes the need for request-time
-synthesis, generation locks, a `GENERATING` state machine, and the CPU contention that on-demand
-synthesis would create on a shared host.
+deterministic. Generating it once and serving static files means playback is a file read.
 
 ```
 Bulk generation (offline, developer machine)
     Bible text  ->  Piper  ->  WAV  ->  ffmpeg  ->  AAC/M4A  ->  upload
                                                                     |
 Runtime (VPS)                                                       v
-    Android app  --HTTPS-->  Cloudflare  -->  FastAPI  -->  static audio
+    Android app  --HTTPS-->  Cloudflare  -->  FastAPI  -->  cached audio
                                                   |
-                                                  +-->  Piper engine (fallback,
-                                                        arbitrary text only)
+                                                  +-->  Piper engine (fallback only)
 ```
 
-The Piper engine still runs on the VPS to serve `POST /api/v1/tts` for arbitrary text, but it is
-**not** on the critical path for chapter playback.
+On a cache miss the API returns `202 GENERATING` immediately and renders in the background; the
+client polls the status endpoint. It never blocks, because one average chapter takes minutes on the
+deployed engine — far past Cloudflare's 100s proxy timeout.
 
 ### Measured performance
 
@@ -47,44 +62,43 @@ Synthesis speed, `en_US-lessac-medium`, warm process, measured 2026-08-17:
 Piper narrates at ~224 words/min at `length_scale: 1.0`, so a KJV-sized translation (783k words) is
 ~58 hours of audio: ~3.5 h of compute on the laptop, ~4 days on the VPS. Hence offline generation.
 
-Consequences for the API:
+### Delivery format
 
-* Chapter synthesis is never synchronous. An average 660-word chapter takes ~4.8 min on the VPS,
-  well past Cloudflare's 100s proxy timeout, so chapter requests return a status and poll.
-* `POST /api/v1/tts` caps input at roughly 600 characters (~33s of VPS work).
-* Requests must be bounded by a concurrency limit that returns 429 when busy: Flask's dev server is
-  single-threaded, so concurrent synthesis serializes and later requests would time out.
+AAC-LC ~48 kbps mono in fMP4 (`.m4a`), `+faststart`. Hardware-decoded on every Android version worth
+supporting, and it seeks cleanly over HTTP range requests — the API answers `206 Partial Content`, so
+dragging the scrubber fetches a byte range instead of re-downloading. Opus is ~2× smaller but its
+seeking story over HTTP is messier. A full translation is ~1.3 GB as AAC against ~9.3 GB as WAV.
 
 ### Why the engine is not publicly exposed
 
 `piper.http_server` has no authentication and ships a browser UI. It listens on the internal Docker
-network only (`expose`, never `ports`). The FastAPI service is the sole public entry point and owns
-authentication and rate limiting.
-
-### Why the prebuilt wheel
-
-Upstream's Dockerfile compiles `libpiper` and espeak-ng from source, which yields the same artifact
-as the published wheel but costs ~10 minutes of saturated CPU per deploy. This host also runs
-production services, so we install `piper-tts` from PyPI instead and cap the container at 1 CPU.
+network only; this API is the sole public entry point and owns authentication and rate limiting.
+Synthesis is additionally bounded by a semaphore that returns `429` rather than queueing, because the
+engine is single-threaded Flask on a 1-CPU cap — concurrent requests serialize and would time out.
 
 ## Deploy
 
-Coolify → project `bible-tts` → environment `production` → Add Resource → Docker Compose, pointed at
-this repo. Voices download into the `piper-voices` volume on first boot, so redeploys don't refetch
-them.
+Two Coolify resources in project `bible-tts`, environment `production`:
 
-Configure via environment variables:
+1. **Engine** — `NgalihyaPro/piper1-gpl`, Build Pack: Docker Compose, `/docker-compose.yml`, **no domain**.
+2. **API** — this repo, Build Pack: Docker Compose, `/docker-compose.yml`, domain `tts.b5internet.com`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `PIPER_VOICES` | `en_US-lessac-medium sw_CD-lanfrica-medium` | Space-separated; the first is the server default |
-| `PIPER_PORT` | `5000` | Internal listen port |
+The API joins the engine's Docker network and reaches it at `http://piper:5000`. Set `PIPER_NETWORK`
+to the engine resource's network name:
+
+```sh
+docker inspect $(docker ps -qf name=piper) \
+  --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{end}}'
+```
+
+Required environment variables are listed in `.env.example`. `API_KEYS` and `PIPER_NETWORK` have no
+defaults and the stack refuses to start without them.
 
 ## Voice licensing
 
-Voice models are **not** committed to this repo, and not only because of their size. Piper voices
-carry per-voice licenses that are independent of Piper's own GPL-3.0, and several are unusable in a
-shipped product. Verified:
+Voice models are **not** committed here, and not only because of their size. Piper voices carry
+per-voice licenses independent of Piper's GPL-3.0, and several are unusable in a shipped product.
+Verified:
 
 | Voice | Dataset / license | Shippable |
 |---|---|---|
@@ -95,21 +109,20 @@ shipped product. Verified:
 | `en_US-ryan-high`, `en_US-hfc_*` | CC BY-NC-SA 4.0 | no |
 | `sw_CD-lanfrica-medium` | dataset terms unstated; fine-tuned from lessac | no |
 
-`lessac` and `lanfrica` are used for development only. Production English is
-`en_US-libritts-high`; production Swahili requires a purpose-recorded voice, since no
-permissively licensed Swahili Piper voice exists.
+`lessac` and `lanfrica` are development-only. Production English is `en_US-libritts-high`; production
+Swahili needs a purpose-recorded voice, as no permissively licensed Swahili Piper voice exists.
 
-Always read the `MODEL_CARD` beside a voice — including its `Training` line, which is where the
-fine-tune lineage hides — before shipping it.
+Always read the `MODEL_CARD` beside a voice — including its `Training` line, where the fine-tune
+lineage hides — before shipping it.
 
 Bible translation text is separately copyrighted. Public-domain translations (KJV, ASV, WEB) are
-safe; NIV/ESV/NKJV/NLT require a publisher licence, as TTS narration creates an audio derivative.
+safe; NIV/ESV/NKJV/NLT require a publisher licence, since narration creates an audio derivative.
 
 ## Licence
 
 No licence declared for this repo's own files yet, which means default copyright — all rights
 reserved. Add one if you want others to reuse it.
 
-Piper itself is GPL-3.0 and is *installed* from PyPI at build time, not vendored here. Running it as
-a network service does not trigger GPL distribution obligations; shipping it inside a mobile app
+Piper itself is GPL-3.0 and runs as a separate service; it is not vendored or linked here. Running it
+as a network service does not trigger GPL distribution obligations; shipping it inside a mobile app
 would.

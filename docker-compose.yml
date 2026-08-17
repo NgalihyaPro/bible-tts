@@ -1,43 +1,65 @@
-# Piper TTS engine, deployed as a Coolify resource.
+# Bible TTS API, deployed as a Coolify resource.
 #
-# Deliberately NOT exposed publicly: piper.http_server has no authentication and
-# ships a browser UI, so a public domain would let anyone burn this host's CPU.
-# It stays on the internal network; the FastAPI service (added later) is the only
-# public entry point and carries the API key and rate limits.
+# The Piper engine is a separate resource (deployed from the piper1-gpl fork).
+# This joins that resource's Docker network and reaches it by its stable service
+# alias, http://piper:5000.
+#
+# Set PIPER_NETWORK in Coolify's environment variables to the engine resource's
+# network name. Find it with:
+#   docker inspect $(docker ps -qf name=piper) \
+#     --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{end}}'
 services:
-  piper:
+  api:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
 
     environment:
-      # Space-separated. First is the server default.
-      PIPER_VOICES: ${PIPER_VOICES:-en_US-lessac-medium sw_CD-lanfrica-medium}
-      PIPER_PORT: 5000
+      # Comma-separated API keys. Set in Coolify; never commit real values.
+      API_KEYS: ${API_KEYS:?set API_KEYS in Coolify environment variables}
+      PIPER_URL: ${PIPER_URL:-http://piper:5000}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LENGTH_SCALE: ${LENGTH_SCALE:-1.0}
+      VOICE_REVISION: ${VOICE_REVISION:-v1}
+      MAX_TTS_CHARS: ${MAX_TTS_CHARS:-600}
+      MAX_CONCURRENT_SYNTHESIS: ${MAX_CONCURRENT_SYNTHESIS:-1}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-60}
+      RATE_LIMIT_WINDOW_S: ${RATE_LIMIT_WINDOW_S:-60}
+      AUDIO_DIR: /data/audio
+      BIBLE_DATA_DIR: /app/data/bible
 
     volumes:
-      # Voices persist across redeploys so they download only once.
-      - piper-voices:/data
+      # Chapter audio. Survives redeploys; this is the thing that must never be
+      # lost, since regenerating it is hours of work.
+      - bible-audio:/data/audio
 
-    # expose, not ports: reachable inside the Docker network only, never bound
-    # to a host port.
+    # Coolify's proxy routes the configured domain to this port. Unlike the
+    # engine, this service IS meant to be public: it holds the API key check and
+    # rate limiting.
     expose:
-      - "5000"
+      - "8080"
 
-    # Hard cap. This host also runs the B5 Internet billing stack, whose
-    # scheduler makes time-sensitive RouterOS calls every 45s. Synthesis is
-    # pure CPU and would otherwise starve it.
-    cpus: 1.0
-    mem_limit: 1500m
+    # Modest: serving cached files is cheap, and synthesis happens in the
+    # engine container, which has its own cap.
+    cpus: 0.5
+    mem_limit: 512m
+
+    networks:
+      - default
+      - piper
 
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/voices').read()"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()"]
       interval: 30s
       timeout: 10s
       retries: 3
-      # Generous: first boot downloads ~63MB per voice before serving.
-      start_period: 180s
+      start_period: 20s
+
+networks:
+  piper:
+    external: true
+    name: ${PIPER_NETWORK:?set PIPER_NETWORK to the piper engine resource's docker network}
 
 volumes:
-  piper-voices:
+  bible-audio:
