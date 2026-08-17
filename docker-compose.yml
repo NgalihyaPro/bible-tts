@@ -1,0 +1,43 @@
+# Piper TTS engine, deployed as a Coolify resource.
+#
+# Deliberately NOT exposed publicly: piper.http_server has no authentication and
+# ships a browser UI, so a public domain would let anyone burn this host's CPU.
+# It stays on the internal network; the FastAPI service (added later) is the only
+# public entry point and carries the API key and rate limits.
+services:
+  piper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+    environment:
+      # Space-separated. First is the server default.
+      PIPER_VOICES: ${PIPER_VOICES:-en_US-lessac-medium sw_CD-lanfrica-medium}
+      PIPER_PORT: 5000
+
+    volumes:
+      # Voices persist across redeploys so they download only once.
+      - piper-voices:/data
+
+    # expose, not ports: reachable inside the Docker network only, never bound
+    # to a host port.
+    expose:
+      - "5000"
+
+    # Hard cap. This host also runs the B5 Internet billing stack, whose
+    # scheduler makes time-sensitive RouterOS calls every 45s. Synthesis is
+    # pure CPU and would otherwise starve it.
+    cpus: 1.0
+    mem_limit: 1500m
+
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/voices').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Generous: first boot downloads ~63MB per voice before serving.
+      start_period: 180s
+
+volumes:
+  piper-voices:

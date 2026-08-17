@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings or Docker fails with "exec format error"
+# after a checkout on Windows.
+*.sh text eol=lf
+Dockerfile text eol=lf

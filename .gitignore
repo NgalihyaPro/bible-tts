@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Voice models: large binaries, and some (lessac, lanfrica) carry licenses that
+# forbid redistribution. Never commit these.
+voices/**/*.onnx
+voices/**/*.onnx.json
+
+# Generated audio and scratch output
+audio/
+*.wav
+
+.env
