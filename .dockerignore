@@ -1,0 +1,19 @@
+# Keep the build context small, and — more importantly — make it impossible to
+# bake voice models into an image. lessac and lanfrica carry licenses that
+# forbid redistribution, so an image containing them could not be pushed to a
+# registry. Voices belong in the piper-voices volume, downloaded at runtime.
+voices/
+*.onnx
+*.onnx.json
+
+# Generated audio lives in a volume, never in an image.
+audio/
+*.wav
+*.m4a
+
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.env

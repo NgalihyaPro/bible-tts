@@ -1,4 +1,7 @@
-# Shell scripts must keep LF endings or Docker fails with "exec format error"
-# after a checkout on Windows.
+# Shell scripts and Dockerfiles must keep LF endings. A CRLF checkout breaks
+# multi-line shell commands inside a Dockerfile (the trailing \r ends up in the
+# command) and produces "exec format error" for scripts.
 *.sh text eol=lf
 Dockerfile text eol=lf
+# The bare "Dockerfile" pattern does not match docker/piper.Dockerfile.
+*.Dockerfile text eol=lf
