@@ -76,6 +76,16 @@ async def audio_status(
 
     job = await job_registry.get(key.as_str())
     if job is None:
+        # Confirm the chapter actually exists before telling a client to ask for
+        # it. Otherwise an unavailable language reports NOT_GENERATED, the client
+        # dutifully requests the audio, and only then gets a 404.
+        try:
+            bible_repo.get_chapter(key.language, key.translation, key.book, key.chapter)
+        except BibleNotFound as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except InvalidReference as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         # Never requested. Not an error: GET the audio endpoint to start
         # generation, then poll here.
         return _status_payload(

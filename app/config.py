@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # language -> translation used when a request omits ?translation=. Keeping
     # this explicit avoids silently narrating the wrong translation.
     default_translations: dict[str, str] = Field(
-        default_factory=lambda: {"en": "kjv", "sw": "swh"}
+        default_factory=lambda: {"en": "kjv", "sw": "suv"}
     )
     # Bumping this invalidates every cached file without deleting anything, so a
     # voice change can never silently serve stale audio.
