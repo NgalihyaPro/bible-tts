@@ -34,6 +34,27 @@ Runtime (VPS)                                                       v
 The Piper engine still runs on the VPS to serve `POST /api/v1/tts` for arbitrary text, but it is
 **not** on the critical path for chapter playback.
 
+### Measured performance
+
+Synthesis speed, `en_US-lessac-medium`, warm process, measured 2026-08-17:
+
+| Host | Speed vs realtime |
+|---|---|
+| Dev laptop, i7-1255U, 1 process | 16.8× |
+| VPS, EPYC 2.0GHz shared vCPU, 1 CPU cap | 0.61× |
+| VPS, 2 CPU cap | 1.26× |
+
+Piper narrates at ~224 words/min at `length_scale: 1.0`, so a KJV-sized translation (783k words) is
+~58 hours of audio: ~3.5 h of compute on the laptop, ~4 days on the VPS. Hence offline generation.
+
+Consequences for the API:
+
+* Chapter synthesis is never synchronous. An average 660-word chapter takes ~4.8 min on the VPS,
+  well past Cloudflare's 100s proxy timeout, so chapter requests return a status and poll.
+* `POST /api/v1/tts` caps input at roughly 600 characters (~33s of VPS work).
+* Requests must be bounded by a concurrency limit that returns 429 when busy: Flask's dev server is
+  single-threaded, so concurrent synthesis serializes and later requests would time out.
+
 ### Why the engine is not publicly exposed
 
 `piper.http_server` has no authentication and ships a browser UI. It listens on the internal Docker
