@@ -41,7 +41,7 @@ _voice = None
 _syn_config = None
 
 
-def _init_worker(voice_path: str, length_scale: float, ort_threads: int) -> None:
+def _init_worker(voice_path: str, length_scale: float, ort_threads: int, speaker: int | None) -> None:
     """Load the model once per process rather than once per chapter.
 
     ort_threads caps onnxruntime's intra-op threads per worker. Measured on a
@@ -58,10 +58,13 @@ def _init_worker(voice_path: str, length_scale: float, ort_threads: int) -> None
     from piper import PiperVoice
 
     _voice = PiperVoice.load(voice_path)
-    if length_scale != 1.0:
+    if length_scale != 1.0 or speaker is not None:
         from piper import SynthesisConfig
 
-        _syn_config = SynthesisConfig(length_scale=length_scale)
+        _syn_config = SynthesisConfig(
+            length_scale=length_scale if length_scale != 1.0 else None,
+            speaker_id=speaker,
+        )
 
 
 def _synth(text: str) -> bytes:
@@ -136,6 +139,8 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="re-render chapters that already exist")
     ap.add_argument("--ort-threads", type=int, default=0,
                     help="cap onnxruntime threads per worker; 0 leaves it to onnxruntime")
+    ap.add_argument("--speaker", type=int, default=None,
+                    help="speaker id for multi-speaker voices; becomes part of the cache path")
     args = ap.parse_args()
 
     voice_path = Path(args.voice).resolve()
@@ -152,6 +157,10 @@ def main() -> int:
     data = json.loads(Path(args.bible).read_text(encoding="utf-8"))
     translation = args.translation or data.get("translation", "unknown")
     voice_name = args.voice_name or voice_path.stem
+    if args.speaker is not None and not args.voice_name:
+        # Different speakers are different voices, so they must not share a
+        # cache path or one would silently serve the other's audio.
+        voice_name = f"{voice_name}-s{args.speaker}"
     out_root = Path(args.out) / args.language / translation / f"{voice_name}@{args.revision}"
 
     wanted = {b.strip() for b in args.books.split(",")} if args.books else None
@@ -174,7 +183,7 @@ def main() -> int:
     if args.limit:
         tasks = tasks[: args.limit]
 
-    print(f"voice      {voice_name}  (length_scale={args.length_scale})")
+    print(f"voice      {voice_name}  (length_scale={args.length_scale}, speaker={args.speaker})")
     print(f"output     {out_root}")
     print(f"chapters   {len(tasks)} to render, {skipped} already present")
     print(f"workers    {args.workers} (ort_threads={args.ort_threads or 'auto'})")
@@ -190,7 +199,7 @@ def main() -> int:
     with mp.Pool(
         processes=args.workers,
         initializer=_init_worker,
-        initargs=(str(voice_path), args.length_scale, args.ort_threads),
+        initargs=(str(voice_path), args.length_scale, args.ort_threads, args.speaker),
     ) as pool:
         for book, chapter, audio_s, wall_s, err in pool.imap_unordered(_render, tasks, chunksize=1):
             done += 1
