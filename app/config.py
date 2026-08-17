@@ -6,6 +6,10 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Substrings that indicate an unreplaced placeholder rather than a real secret.
+_PLACEHOLDER_MARKERS = ("set api_keys", "changeme", "change-me", "your-key", "yourkey", "example")
+_MIN_KEY_LENGTH = 16
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -19,8 +23,11 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     # --- auth ---
-    # Empty disables auth, which is only ever acceptable for local development.
+    # Required. Startup aborts if this is missing or looks like a placeholder,
+    # so the service can never come up unauthenticated on a public domain.
     api_keys: str = ""
+    # Escape hatch for local development and tests only. Never set in production.
+    allow_insecure_no_auth: bool = False
 
     # --- piper engine ---
     # Reached over the internal Docker network; never exposed publicly.
@@ -86,6 +93,38 @@ class Settings(BaseSettings):
     @property
     def auth_enabled(self) -> bool:
         return bool(self.api_key_list)
+
+    def assert_auth_configured(self) -> None:
+        """Abort startup unless real API keys are present.
+
+        Compose's `${API_KEYS:?...}` guard is not enough: Coolify parses that
+        syntax and uses the error message as a *default value*, so the service
+        would happily start with the placeholder text as its key -- a key that
+        is published in a public repository. Enforcement has to live here.
+        """
+        if self.allow_insecure_no_auth:
+            return
+
+        keys = self.api_key_list
+        if not keys:
+            raise RuntimeError(
+                "API_KEYS is empty. Set it to one or more secret keys "
+                "(openssl rand -hex 32), or set ALLOW_INSECURE_NO_AUTH=true for "
+                "local development only."
+            )
+
+        for key in keys:
+            lowered = key.lower()
+            if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+                raise RuntimeError(
+                    "API_KEYS still contains placeholder text. Replace it with a "
+                    "generated secret (openssl rand -hex 32)."
+                )
+            if len(key) < _MIN_KEY_LENGTH:
+                raise RuntimeError(
+                    f"API_KEYS contains a key shorter than {_MIN_KEY_LENGTH} "
+                    "characters. Use a generated secret (openssl rand -hex 32)."
+                )
 
 
 @lru_cache

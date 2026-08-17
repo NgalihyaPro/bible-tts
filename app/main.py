@@ -24,12 +24,15 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    # Before anything else: refuse to serve a public domain without real keys.
+    s.assert_auth_configured()
+
     audio_cache.root.mkdir(parents=True, exist_ok=True)
     await piper_client.start()
 
     log.info("piper=%s audio_dir=%s ffmpeg=%s", s.piper_url, audio_cache.root, ffmpeg_available())
     if not s.auth_enabled:
-        log.warning("API_KEYS is empty - authentication is DISABLED")
+        log.warning("ALLOW_INSECURE_NO_AUTH is set - authentication is DISABLED")
     if not ffmpeg_available():
         log.warning("ffmpeg not found - chapter generation will fail")
 
