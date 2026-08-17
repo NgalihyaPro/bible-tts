@@ -76,9 +76,14 @@ async def audio_status(
 
     job = await job_registry.get(key.as_str())
     if job is None:
-        # Never requested. Not an error: the client should request the audio
-        # endpoint, which starts generation.
-        return _status_payload(key, JobStatus.FAILED, detail="not generated yet")
+        # Never requested. Not an error: GET the audio endpoint to start
+        # generation, then poll here.
+        return _status_payload(
+            key,
+            JobStatus.NOT_GENERATED,
+            url=f"/api/v1/bible/audio/{key.language}/{key.book}/{key.chapter}?translation={key.translation}",
+            detail="not generated yet - request the audio URL to start generation",
+        )
     return _status_payload(key, job.status, detail=job.error)
 
 

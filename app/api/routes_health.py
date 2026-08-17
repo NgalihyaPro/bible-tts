@@ -15,6 +15,17 @@ log = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 
+@router.get("/")
+async def root() -> dict:
+    """Service identity. Clients probe / on startup; a 404 there looks like an outage."""
+    return {
+        "service": "bible-tts",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Unauthenticated: this is what the container healthcheck and uptime probes hit.

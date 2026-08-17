@@ -9,6 +9,10 @@ class JobStatus(str, Enum):
     READY = "READY"
     GENERATING = "GENERATING"
     FAILED = "FAILED"
+    # Never requested. Distinct from FAILED: nothing went wrong, the client just
+    # needs to hit the audio endpoint to start generation. Reporting this as
+    # FAILED made clients show an error for a chapter that was merely absent.
+    NOT_GENERATED = "NOT_GENERATED"
 
 
 class TTSRequest(BaseModel):
