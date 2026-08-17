@@ -1,8 +1,10 @@
 """Bulk-generate chapter audio offline.
 
-Runs on a developer machine, not the VPS: synthesis measured 16.8x realtime on a
-laptop against 0.61x on the deployed 1-CPU container, so a full translation is a
-few hours here versus days there.
+Runs on a developer machine, not the VPS: sustained throughput measured ~6.2x
+realtime on a 15W laptop against 0.61x on the deployed 1-CPU container, so a
+full translation is roughly ten hours here versus four days there. (A short
+burst hits 16.8x, but the chip throttles under sustained load; size plans on the
+sustained figure.)
 
 Output lands in the exact cache layout the API serves from:
 
