@@ -1,23 +1,60 @@
-# Bible TTS API, deployed as a Coolify resource.
+# Bible TTS: one Coolify resource, two containers.
 #
-# The Piper engine is a separate resource (deployed from the piper1-gpl fork).
-# This joins that resource's Docker network and reaches it by its stable service
-# alias, http://piper:5000.
+#   Android app --HTTPS--> tts.b5internet.com --> api --internal--> piper
 #
-# Set PIPER_NETWORK in Coolify's environment variables to the engine resource's
-# network name. Find it with:
-#   docker inspect $(docker ps -qf name=piper) \
-#     --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{end}}'
+# Compose creates the network, so the two services reach each other by service
+# name with no external network wiring to configure or break.
 services:
+  piper:
+    build:
+      context: .
+      dockerfile: docker/piper.Dockerfile
+    restart: unless-stopped
+
+    environment:
+      # Space-separated. First entry is the engine's default voice.
+      PIPER_VOICES: ${PIPER_VOICES:-en_US-lessac-medium sw_CD-lanfrica-medium}
+      PIPER_PORT: 5000
+
+    volumes:
+      # Voice models persist across redeploys; without this every deploy would
+      # re-download ~126MB before the service could start.
+      - piper-voices:/data
+
+    # expose, never ports: reachable only on the Compose network. This service
+    # has no authentication and serves a browser UI, so it must not be public.
+    expose:
+      - "5000"
+
+    # Synthesis is pure CPU. This host also runs the B5 Internet billing stack,
+    # whose scheduler makes time-sensitive RouterOS calls every 45s.
+    cpus: 1.0
+    mem_limit: 1500m
+
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/voices').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Generous: a first boot on an empty volume downloads ~63MB per voice.
+      start_period: 180s
+
   api:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
 
+    depends_on:
+      piper:
+        # Start only once voices are downloaded and the engine answers, so the
+        # API's first /health is meaningful rather than a spurious failure.
+        condition: service_healthy
+
     environment:
-      # Comma-separated API keys. Set in Coolify; never commit real values.
+      # Set in Coolify. No default: the stack must not start unauthenticated.
       API_KEYS: ${API_KEYS:?set API_KEYS in Coolify environment variables}
+      # Compose service name. No external network, no UUID to go stale.
       PIPER_URL: ${PIPER_URL:-http://piper:5000}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LENGTH_SCALE: ${LENGTH_SCALE:-1.0}
@@ -30,24 +67,18 @@ services:
       BIBLE_DATA_DIR: /app/data/bible
 
     volumes:
-      # Chapter audio. Survives redeploys; this is the thing that must never be
-      # lost, since regenerating it is hours of work.
+      # Chapter audio. The one volume that must never be lost: refilling it is
+      # hours of synthesis.
       - bible-audio:/data/audio
 
-    # Coolify's proxy routes the configured domain to this port. Unlike the
-    # engine, this service IS meant to be public: it holds the API key check and
-    # rate limiting.
+    # The only public service. Coolify's proxy routes the domain to this port.
     expose:
       - "8080"
 
-    # Modest: serving cached files is cheap, and synthesis happens in the
-    # engine container, which has its own cap.
+    # Serving cached files is cheap; synthesis happens in the piper container,
+    # which carries its own cap.
     cpus: 0.5
     mem_limit: 512m
-
-    networks:
-      - default
-      - piper
 
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()"]
@@ -56,10 +87,6 @@ services:
       retries: 3
       start_period: 20s
 
-networks:
-  piper:
-    external: true
-    name: ${PIPER_NETWORK:?set PIPER_NETWORK to the piper engine resource's docker network}
-
 volumes:
+  piper-voices:
   bible-audio:

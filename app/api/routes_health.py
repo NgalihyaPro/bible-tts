@@ -8,7 +8,7 @@ from app.config import get_settings
 from app.schemas import HealthResponse
 from app.services.audio import ffmpeg_available
 from app.services.cache import audio_cache
-from app.services.generate import voice_for_language
+from app.services.generate import voice_for
 from app.services.piper import piper_client
 
 log = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ async def voices() -> dict:
     return {
         "configured": s.voices,
         "default_language": s.default_language,
-        "default_voice": voice_for_language(s.default_language),
+        "default_voice": voice_for(s.default_language),
         "loaded": loaded,
         "revision": s.voice_revision,
     }

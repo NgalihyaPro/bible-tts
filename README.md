@@ -8,8 +8,8 @@ Cloudflare at `tts.b5internet.com`.
 
 | Component | State |
 |---|---|
-| Piper engine | deployed (separate Coolify resource, from the `piper1-gpl` fork) |
-| FastAPI API (this repo) | built, tested |
+| Piper engine | in this stack, internal only |
+| FastAPI API | built, tested |
 | Bible text | sample JSON; database phase pending |
 | Pre-generated chapter audio | pending |
 | Android client | not started |
@@ -78,21 +78,21 @@ engine is single-threaded Flask on a 1-CPU cap — concurrent requests serialize
 
 ## Deploy
 
-Two Coolify resources in project `bible-tts`, environment `production`:
+**One** Coolify resource in project `bible-tts`, environment `production`: this repo, Build Pack
+Docker Compose, compose file `/docker-compose.yml`, domain `tts.b5internet.com`.
 
-1. **Engine** — `NgalihyaPro/piper1-gpl`, Build Pack: Docker Compose, `/docker-compose.yml`, **no domain**.
-2. **API** — this repo, Build Pack: Docker Compose, `/docker-compose.yml`, domain `tts.b5internet.com`.
+The stack brings up two containers. Compose creates the network, so the API reaches the engine at
+`http://piper:5000` by service name — there is no external network to configure or go stale.
 
-The API joins the engine's Docker network and reaches it at `http://piper:5000`. Set `PIPER_NETWORK`
-to the engine resource's network name:
+| Container | Public | Limits | Volume |
+|---|---|---|---|
+| `api` | yes, via the domain | 0.5 CPU / 512 MB | `bible-audio` → `/data/audio` |
+| `piper` | no, `expose` only | 1.0 CPU / 1500 MB | `piper-voices` → `/data` |
 
-```sh
-docker inspect $(docker ps -qf name=piper) \
-  --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{end}}'
-```
+`api` waits on `piper`'s healthcheck before starting, so its first `/health` is meaningful.
 
-Required environment variables are listed in `.env.example`. `API_KEYS` and `PIPER_NETWORK` have no
-defaults and the stack refuses to start without them.
+`API_KEYS` is the only variable that must be set; it has no default and the stack refuses to start
+without it. Everything else in `.env.example` has a working default.
 
 ## Voice licensing
 

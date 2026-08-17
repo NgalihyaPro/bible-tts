@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from app.config import get_settings
 from app.schemas import TTSRequest
 from app.security import rate_limit, require_api_key
-from app.services.generate import BusyError, synthesize_text, voice_for_language
+from app.services.generate import BusyError, synthesize_text, voice_for
 from app.services.piper import PiperError
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ async def tts(
     else:
         language = payload.language or s.default_language
         try:
-            voice = voice_for_language(language)
+            voice = voice_for(language)
         except LookupError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

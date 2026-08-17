@@ -28,8 +28,11 @@ class Settings(BaseSettings):
     piper_timeout_s: float = 300.0
 
     # --- voices ---
-    # language -> piper voice name. Adding a language is a config change, not a
-    # code change.
+    # Explicit voice selection: "{language}:{translation}" wins over "{language}".
+    # Nothing is inferred from the text, so adding a language or giving one
+    # translation its own narrator is a config change, not a code change.
+    # Set as JSON in the environment, e.g.
+    #   VOICES={"en":"en_US-libritts-high","en:kjv":"en_US-lessac-medium"}
     voices: dict[str, str] = Field(
         default_factory=lambda: {
             "en": "en_US-lessac-medium",

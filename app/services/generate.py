@@ -18,8 +18,19 @@ from app.services.piper import piper_client
 log = logging.getLogger(__name__)
 
 
-def voice_for_language(language: str) -> str:
+def voice_for(language: str, translation: str | None = None) -> str:
+    """Resolve the configured voice for a language, or a specific translation.
+
+    A `language:translation` entry takes precedence over the bare language, so a
+    single translation can be given its own narrator without affecting the rest.
+    Raises rather than falling back to a default: silently narrating Swahili with
+    an English voice would be worse than a clear error.
+    """
     s = get_settings()
+    if translation:
+        specific = s.voices.get(f"{language}:{translation}")
+        if specific:
+            return specific
     voice = s.voices.get(language)
     if not voice:
         raise LookupError(f"no voice configured for language {language!r}")

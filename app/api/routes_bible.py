@@ -11,7 +11,7 @@ from app.schemas import AudioStatusResponse, JobStatus
 from app.security import rate_limit, require_api_key
 from app.services.bible import BibleNotFound, InvalidReference, bible_repo
 from app.services.cache import CacheKey, audio_cache
-from app.services.generate import generate_chapter, load_chapter, voice_for_language
+from app.services.generate import generate_chapter, load_chapter, voice_for
 from app.services.jobs import job_registry
 
 log = logging.getLogger(__name__)
@@ -20,17 +20,19 @@ router = APIRouter(prefix="/api/v1/bible", tags=["bible"])
 
 def _resolve(language: str, translation: str | None, book: str, chapter: int) -> tuple[CacheKey, str]:
     s = get_settings()
-    try:
-        voice = voice_for_language(language)
-    except LookupError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Translation is resolved first: the voice may be chosen per translation.
     trans = translation or s.default_translations.get(language)
     if not trans:
         available = bible_repo.translations(language)
         if not available:
             raise HTTPException(status_code=404, detail=f"no translations available for {language!r}")
         trans = available[0]
+
+    try:
+        voice = voice_for(language, trans)
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
         key = audio_cache.key(language, trans, book, chapter, voice)
