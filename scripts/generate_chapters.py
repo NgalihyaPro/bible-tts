@@ -39,8 +39,19 @@ _voice = None
 _syn_config = None
 
 
-def _init_worker(voice_path: str, length_scale: float) -> None:
-    """Load the model once per process rather than once per chapter."""
+def _init_worker(voice_path: str, length_scale: float, ort_threads: int) -> None:
+    """Load the model once per process rather than once per chapter.
+
+    ort_threads caps onnxruntime's intra-op threads per worker. Measured on a
+    2P+8E laptop, capping at 1 was slower than leaving it free, so the default
+    is 0 (leave alone); the flag exists because the best value is hardware
+    dependent. Must be set before onnxruntime is imported, which happens on the
+    piper import below.
+    """
+    if ort_threads > 0:
+        for var in ("OMP_NUM_THREADS", "ORT_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            os.environ[var] = str(ort_threads)
+
     global _voice, _syn_config
     from piper import PiperVoice
 
@@ -116,9 +127,13 @@ def main() -> int:
     ap.add_argument("--length-scale", type=float, default=1.0, help=">1.0 slows narration")
     ap.add_argument("--bitrate", default="48k")
     ap.add_argument("--books", default=None, help="comma-separated slugs; default all")
+    ap.add_argument("--chapters", default=None,
+                    help="comma-separated chapter numbers, applied within --books; default all")
     ap.add_argument("--limit", type=int, default=None, help="stop after N chapters (for testing)")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     ap.add_argument("--force", action="store_true", help="re-render chapters that already exist")
+    ap.add_argument("--ort-threads", type=int, default=0,
+                    help="cap onnxruntime threads per worker; 0 leaves it to onnxruntime")
     args = ap.parse_args()
 
     voice_path = Path(args.voice).resolve()
@@ -138,12 +153,15 @@ def main() -> int:
     out_root = Path(args.out) / args.language / translation / f"{voice_name}@{args.revision}"
 
     wanted = {b.strip() for b in args.books.split(",")} if args.books else None
+    wanted_ch = {int(c) for c in args.chapters.split(",")} if args.chapters else None
 
     tasks, skipped = [], 0
     for slug, book in data["books"].items():
         if wanted and slug not in wanted:
             continue
         for chapter_no, verses in sorted(book["chapters"].items(), key=lambda kv: int(kv[0])):
+            if wanted_ch and int(chapter_no) not in wanted_ch:
+                continue
             dest = out_root / slug / f"{chapter_no}.m4a"
             if dest.is_file() and dest.stat().st_size > 0 and not args.force:
                 skipped += 1
@@ -157,7 +175,7 @@ def main() -> int:
     print(f"voice      {voice_name}  (length_scale={args.length_scale})")
     print(f"output     {out_root}")
     print(f"chapters   {len(tasks)} to render, {skipped} already present")
-    print(f"workers    {args.workers}")
+    print(f"workers    {args.workers} (ort_threads={args.ort_threads or 'auto'})")
     if not tasks:
         print("nothing to do")
         return 0
@@ -170,7 +188,7 @@ def main() -> int:
     with mp.Pool(
         processes=args.workers,
         initializer=_init_worker,
-        initargs=(str(voice_path), args.length_scale),
+        initargs=(str(voice_path), args.length_scale, args.ort_threads),
     ) as pool:
         for book, chapter, audio_s, wall_s, err in pool.imap_unordered(_render, tasks, chunksize=1):
             done += 1
