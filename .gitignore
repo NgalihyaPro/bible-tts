@@ -7,11 +7,12 @@ __pycache__/
 voices/**/*.onnx
 voices/**/*.onnx.json
 
-# Generated audio and scratch output
-audio/
+# Generated audio trees. Never commit these: ~1.5 GB per language, and they
+# are reproducible from the text plus the voice model. A specific-name rule
+# missed audio_v2/ once, so match the prefix instead -- this also covers
+# audio_en/ and any future language tree.
+audio*/
 *.wav
+*.m4a
 
 .env
-
-# Repaired and scratch audio trees
-audio_repaired/
