@@ -82,8 +82,20 @@ def concat_wavs(
             frames.append(w.readframes(w.getnframes()))
 
     assert params is not None
-    silence = b"\x00" * int(params.framerate * params.nchannels * params.sampwidth * gap_ms / 1000)
+    # Compute the gap in FRAMES, then convert to bytes. Deriving the byte count
+    # directly (framerate * channels * sampwidth * gap_ms / 1000) gives 15435
+    # for 22050Hz mono 16-bit at 350ms -- odd, so not a whole frame. That
+    # shifted every following sample by one byte, pairing the low byte of one
+    # sample with the high byte of the next, which sounds like broadband static.
+    # It corrupted 95% of a generated corpus before being found.
+    frame_bytes = params.nchannels * params.sampwidth
+    gap_frames = int(params.framerate * gap_ms / 1000)
+    silence = bytes(gap_frames * frame_bytes)
+    assert len(silence) % frame_bytes == 0, "gap must be a whole number of frames"
     joined = silence.join(frames)
+
+    if peak_dbfs is not None and params.sampwidth == 2:
+        joined = _level_and_tail(joined, params.framerate, peak_dbfs)
 
     out = io.BytesIO()
     with wave.open(out, "wb") as w:

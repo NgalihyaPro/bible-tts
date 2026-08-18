@@ -35,10 +35,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 # Reused so offline output is chunked and joined identically to the API's own
 # fallback path -- otherwise pre-generated and on-demand audio would differ.
 from app.services.audio import VERSE_GAP_MS, chunk_verses  # noqa: E402
+from scripts.detect_noise import decode as _decode_f32, noisy_spans  # noqa: E402
 
 SR = 22050
 
@@ -154,6 +156,31 @@ def _transcode(wav_bytes: bytes, dest: Path, bitrate: str) -> None:
     tmp.replace(dest)
 
 
+def _validate(dest: Path, expected_s: float) -> str | None:
+    """Return a reason string when the encoded chapter is unacceptable.
+
+    Guards the two failures seen in production: byte-misaligned concatenation
+    producing broadband noise, and encoding at 0 dBFS producing clipping on
+    playback.
+    """
+    x = _decode_f32(dest)
+    if x.size == 0:
+        return "undecodable"
+
+    dur = len(x) / SR
+    if abs(dur - expected_s) > 1.0:
+        return f"duration {dur:.1f}s != expected {expected_s:.1f}s"
+
+    peak = float(np.abs(x).max())
+    if peak > 1.0:
+        return f"peak {peak:.3f} above full scale"
+
+    _, noisy_s, _ = noisy_spans(x)
+    if noisy_s > 0.5:
+        return f"{noisy_s:.1f}s of noise detected"
+    return None
+
+
 def _render(task: tuple) -> tuple:
     """Render one chapter. Returns (book, chapter, audio_s, wall_s, error)."""
     book, chapter, verses, dest_str, bitrate = task
@@ -164,7 +191,7 @@ def _render(task: tuple) -> tuple:
         if not chunks:
             return (book, chapter, 0.0, 0.0, "no text")
 
-        gap = np.zeros(int(SR * VERSE_GAP_MS / 1000))
+        gap = np.zeros(int(SR * VERSE_GAP_MS / 1000))  # samples, not bytes
         parts: list[np.ndarray] = []
         for c in chunks:
             with wave.open(io.BytesIO(_synth(c))) as w:
@@ -184,6 +211,11 @@ def _render(task: tuple) -> tuple:
             if peak <= 1.0:
                 break
             target -= 20 * math.log10(peak) + 1.0
+
+        problem = _validate(dest, audio_s + TAIL_SILENCE_S)
+        if problem:
+            dest.unlink(missing_ok=True)
+            return (book, chapter, 0.0, time.perf_counter() - started, f"validation: {problem}")
         return (book, chapter, audio_s, time.perf_counter() - started, None)
     except Exception as exc:  # noqa: BLE001 - one bad chapter must not kill the run
         return (book, chapter, 0.0, time.perf_counter() - started, str(exc)[:200])
