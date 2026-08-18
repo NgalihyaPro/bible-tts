@@ -1,5 +1,6 @@
 """Text chunking, WAV assembly and transcoding."""
 
+import array
 import asyncio
 import io
 import logging
@@ -15,6 +16,17 @@ log = logging.getLogger(__name__)
 MAX_CHUNK_CHARS = 800
 # Brief pause between verses; without it the reading runs together.
 VERSE_GAP_MS = 350
+
+# Chapters are levelled once, with headroom. Piper normalises every synthesis
+# call to full scale, so concatenated chunks otherwise sit at 0 dBFS; encoding
+# that to AAC makes the decoder's reconstruction overshoot (measured up to
+# +11 dBFS on real chapters) and every 16-bit player hard-clips it.
+PEAK_DBFS = -3.0
+# Appended before the fade: chapters often end mid-word, so fading the original
+# tail would clip the final syllable.
+TAIL_SILENCE_MS = 120
+FADE_OUT_MS = 80
+FADE_IN_MS = 10
 
 
 def chunk_verses(verse_texts: list[str], max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
@@ -39,10 +51,17 @@ def chunk_verses(verse_texts: list[str], max_chars: int = MAX_CHUNK_CHARS) -> li
     return chunks
 
 
-def concat_wavs(wav_blobs: list[bytes], gap_ms: int = VERSE_GAP_MS) -> bytes:
+def concat_wavs(
+    wav_blobs: list[bytes],
+    gap_ms: int = VERSE_GAP_MS,
+    peak_dbfs: float | None = PEAK_DBFS,
+) -> bytes:
     """Concatenate WAV blobs, inserting silence between them.
 
     All blobs must share a format, which holds because they come from one voice.
+
+    Levels the result once and ends it on a fade. Pass peak_dbfs=None to skip
+    that and return the raw concatenation.
     """
     if not wav_blobs:
         raise ValueError("no audio to concatenate")
@@ -73,6 +92,31 @@ def concat_wavs(wav_blobs: list[bytes], gap_ms: int = VERSE_GAP_MS) -> bytes:
         w.setframerate(params.framerate)
         w.writeframes(joined)
     return out.getvalue()
+
+
+def _level_and_tail(frames: bytes, framerate: int, peak_dbfs: float) -> bytes:
+    """Scale to a single peak target, then append silence and fade out."""
+    samples = array.array("h")
+    samples.frombytes(frames)
+    if not samples:
+        return frames
+
+    peak = max(abs(min(samples)), abs(max(samples)))
+    if peak:
+        scale = (10 ** (peak_dbfs / 20)) * 32767.0 / peak
+        samples = array.array("h", (int(max(-32768, min(32767, s * scale))) for s in samples))
+
+    samples.extend([0] * int(framerate * TAIL_SILENCE_MS / 1000))
+
+    fade_out = int(framerate * FADE_OUT_MS / 1000)
+    n = len(samples)
+    for i in range(fade_out):
+        samples[n - fade_out + i] = int(samples[n - fade_out + i] * (1.0 - i / fade_out))
+    fade_in = int(framerate * FADE_IN_MS / 1000)
+    for i in range(fade_in):
+        samples[i] = int(samples[i] * (i / fade_in))
+
+    return samples.tobytes()
 
 
 def wav_duration(blob: bytes) -> float:

@@ -12,3 +12,6 @@ audio/
 *.wav
 
 .env
+
+# Repaired and scratch audio trees
+audio_repaired/

@@ -24,18 +24,23 @@ import io
 import json
 import multiprocessing as mp
 import os
+import math
 import subprocess
 import sys
 import time
 import wave
 from pathlib import Path
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 # Reused so offline output is chunked and joined identically to the API's own
 # fallback path -- otherwise pre-generated and on-demand audio would differ.
-from app.services.audio import VERSE_GAP_MS, chunk_verses, concat_wavs  # noqa: E402
+from app.services.audio import VERSE_GAP_MS, chunk_verses  # noqa: E402
+
+SR = 22050
 
 _voice = None
 _syn_config = None
@@ -57,14 +62,18 @@ def _init_worker(voice_path: str, length_scale: float, ort_threads: int, speaker
     global _voice, _syn_config
     from piper import PiperVoice
 
-    _voice = PiperVoice.load(voice_path)
-    if length_scale != 1.0 or speaker is not None:
-        from piper import SynthesisConfig
+    from piper import SynthesisConfig
 
-        _syn_config = SynthesisConfig(
-            length_scale=length_scale if length_scale != 1.0 else None,
-            speaker_id=speaker,
-        )
+    _voice = PiperVoice.load(voice_path)
+    # normalize_audio=False is essential. Piper otherwise scales EVERY call to
+    # full scale, so concatenated chunks all sit at 0 dBFS; encoding that to AAC
+    # makes the decoder overshoot (measured up to +11 dBFS) and every 16-bit
+    # player hard-clips it. Levels are set once per chapter instead, below.
+    _syn_config = SynthesisConfig(
+        length_scale=length_scale if length_scale != 1.0 else None,
+        speaker_id=speaker,
+        normalize_audio=False,
+    )
 
 
 def _synth(text: str) -> bytes:
@@ -74,6 +83,51 @@ def _synth(text: str) -> bytes:
             _voice.synthesize_wav(text, wf, syn_config=_syn_config)
         else:
             _voice.synthesize_wav(text, wf)
+    return buf.getvalue()
+
+
+PEAK_DBFS = -3.0        # headroom; the AAC encoder overshoots on transients
+TAIL_SILENCE_S = 0.120  # appended before the fade, so speech is never clipped
+FADE_OUT_S = 0.080
+FADE_IN_S = 0.010
+
+
+def _level_and_tail(pcm: np.ndarray, peak_dbfs: float) -> np.ndarray:
+    """Normalise once across the whole chapter, then end it cleanly.
+
+    Chapters frequently end mid-word, so silence is appended first and the fade
+    only ever touches that silence.
+    """
+    peak = float(np.abs(pcm).max())
+    if peak > 0:
+        pcm = pcm * (10 ** (peak_dbfs / 20) * 32767.0 / peak)
+    pcm = np.concatenate([pcm, np.zeros(int(SR * TAIL_SILENCE_S))])
+    fo, fi = int(SR * FADE_OUT_S), int(SR * FADE_IN_S)
+    pcm[-fo:] *= np.linspace(1.0, 0.0, fo)
+    pcm[:fi] *= np.linspace(0.0, 1.0, fi)
+    return pcm
+
+
+def _encoded_peak(path: Path) -> float:
+    """True peak of the encoded file, decoded as float.
+
+    An int16 decode would clip the very overshoot we are checking for.
+    """
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "f32le", "-ac", "1", "-ar", str(SR), "-"],
+        capture_output=True,
+    )
+    a = np.frombuffer(r.stdout, dtype=np.float32)
+    return float(np.abs(a).max()) if a.size else 0.0
+
+
+def _to_wav(pcm: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(np.clip(pcm, -32768, 32767).astype(np.int16).tobytes())
     return buf.getvalue()
 
 
@@ -109,11 +163,27 @@ def _render(task: tuple) -> tuple:
         chunks = chunk_verses(verses)
         if not chunks:
             return (book, chapter, 0.0, 0.0, "no text")
-        blobs = [_synth(c) for c in chunks]
-        wav = concat_wavs(blobs, VERSE_GAP_MS)
-        with wave.open(io.BytesIO(wav)) as w:
-            audio_s = w.getnframes() / w.getframerate()
-        _transcode(wav, dest, bitrate)
+
+        gap = np.zeros(int(SR * VERSE_GAP_MS / 1000))
+        parts: list[np.ndarray] = []
+        for c in chunks:
+            with wave.open(io.BytesIO(_synth(c))) as w:
+                seg = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float64)
+            if parts:
+                parts.append(gap)
+            parts.append(seg)
+        pcm = np.concatenate(parts)
+        audio_s = len(pcm) / SR
+
+        # The encoder overshoots by a content-dependent amount, so verify the
+        # result and back off until it genuinely fits under full scale.
+        target = PEAK_DBFS
+        for _ in range(4):
+            _transcode(_to_wav(_level_and_tail(pcm.copy(), target)), dest, bitrate)
+            peak = _encoded_peak(dest)
+            if peak <= 1.0:
+                break
+            target -= 20 * math.log10(peak) + 1.0
         return (book, chapter, audio_s, time.perf_counter() - started, None)
     except Exception as exc:  # noqa: BLE001 - one bad chapter must not kill the run
         return (book, chapter, 0.0, time.perf_counter() - started, str(exc)[:200])
@@ -131,6 +201,8 @@ def main() -> int:
     ap.add_argument("--revision", default="v1", help="must match VOICE_REVISION on the server")
     ap.add_argument("--length-scale", type=float, default=1.0, help=">1.0 slows narration")
     ap.add_argument("--bitrate", default="48k")
+    ap.add_argument("--peak-dbfs", type=float, default=PEAK_DBFS,
+                    help="chapter peak before encoding; lowered automatically if the encoder overshoots")
     ap.add_argument("--books", default=None, help="comma-separated slugs; default all")
     ap.add_argument("--chapters", default=None,
                     help="comma-separated chapter numbers, applied within --books; default all")
