@@ -39,10 +39,14 @@ class Settings(BaseSettings):
     # Nothing is inferred from the text, so adding a language or giving one
     # translation its own narrator is a config change, not a code change.
     # Set as JSON in the environment, e.g.
-    #   VOICES={"en":"en_US-libritts-high","en:kjv":"en_US-lessac-medium"}
+    #   VOICES={"en":"en_US-libritts-high","en:kjv":"en_US-kristin-medium"}
+    # en_US-kristin-medium is LibriVox, public domain. Do not default to
+    # en_US-lessac-medium or anything fine-tuned from it: the Blizzard 2013
+    # licence excludes commercial use and bars stand-alone audio products,
+    # which is exactly what a narrated Bible is.
     voices: dict[str, str] = Field(
         default_factory=lambda: {
-            "en": "en_US-lessac-medium",
+            "en": "en_US-kristin-medium",
             "sw": "sw_CD-lanfrica-medium",
         }
     )

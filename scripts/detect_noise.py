@@ -7,6 +7,12 @@ so the threshold is not delicate.
 
 Spectral flatness was tried first and proved unreliable -- it also flags quiet
 frames and codec noise-fill. Band energy does not.
+
+Those percentages are for sw_CD-lanfrica-medium and do not transfer to every
+voice. en_US-kristin-medium is brighter, and its sibilants reach 54-75% of frame
+energy above 6.8 kHz for as long as 0.47s -- indistinguishable from corruption
+frame by frame. Duration is what separates them, so callers validating a bright
+voice should raise min_span_s rather than trust the default.
 """
 
 from __future__ import annotations

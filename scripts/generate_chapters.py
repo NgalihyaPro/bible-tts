@@ -94,19 +94,24 @@ FADE_OUT_S = 0.080
 FADE_IN_S = 0.010
 
 
-def _level_and_tail(pcm: np.ndarray, peak_dbfs: float) -> np.ndarray:
+def _level_and_tail(pcm: np.ndarray, peak_dbfs: float, peak: float | None = None) -> np.ndarray:
     """Normalise once across the whole chapter, then end it cleanly.
 
     Chapters frequently end mid-word, so silence is appended first and the fade
     only ever touches that silence.
+
+    Takes the source peak as an argument so a retry does not rescan the array,
+    and never mutates the caller's buffer.
     """
-    peak = float(np.abs(pcm).max())
-    if peak > 0:
-        pcm = pcm * (10 ** (peak_dbfs / 20) * 32767.0 / peak)
-    pcm = np.concatenate([pcm, np.zeros(int(SR * TAIL_SILENCE_S))])
+    if peak is None:
+        peak = float(np.abs(pcm).max())
+    tail = np.zeros(int(SR * TAIL_SILENCE_S), dtype=np.float32)
+    scaled = pcm * np.float32(10 ** (peak_dbfs / 20) * 32767.0 / peak) if peak > 0 else pcm
+    pcm = np.concatenate([scaled, tail])
+    del scaled
     fo, fi = int(SR * FADE_OUT_S), int(SR * FADE_IN_S)
-    pcm[-fo:] *= np.linspace(1.0, 0.0, fo)
-    pcm[:fi] *= np.linspace(0.0, 1.0, fi)
+    pcm[-fo:] *= np.linspace(1.0, 0.0, fo, dtype=np.float32)
+    pcm[:fi] *= np.linspace(0.0, 1.0, fi, dtype=np.float32)
     return pcm
 
 
@@ -175,8 +180,15 @@ def _validate(dest: Path, expected_s: float) -> str | None:
     if peak > 1.0:
         return f"peak {peak:.3f} above full scale"
 
-    _, noisy_s, _ = noisy_spans(x)
-    if noisy_s > 0.5:
+    # Sibilance also puts energy above 6.8 kHz, so spans are only counted from
+    # 1.0s up. A run of /s/ in KJV English holds the band for up to 0.47s, which
+    # under the old 0.35s/0.5s setting deleted 29 sound chapters and made
+    # proverbs 18 and ezekiel 23 -- the most sibilant in the Bible -- fail every
+    # attempt. The defect this guards against is not remotely that brief: across
+    # 40 known byte-misaligned chapters it measured 3.6s to 164s, median 57s,
+    # against exactly 0.0s for every clean file in either language.
+    _, noisy_s, _ = noisy_spans(x, min_span_s=1.0)
+    if noisy_s > 2.0:
         return f"{noisy_s:.1f}s of noise detected"
     return None
 
@@ -191,22 +203,28 @@ def _render(task: tuple) -> tuple:
         if not chunks:
             return (book, chapter, 0.0, 0.0, "no text")
 
-        gap = np.zeros(int(SR * VERSE_GAP_MS / 1000))  # samples, not bytes
+        # float32 throughout: a 10-minute chapter is 53MB here against 106MB as
+        # float64, and four workers each holding several copies of that was
+        # enough to push a 16GB machine into the pagefile. Paging cost 10-20x on
+        # long chapters -- far more than the precision was ever worth.
+        gap = np.zeros(int(SR * VERSE_GAP_MS / 1000), dtype=np.float32)  # samples, not bytes
         parts: list[np.ndarray] = []
         for c in chunks:
             with wave.open(io.BytesIO(_synth(c))) as w:
-                seg = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float64)
+                seg = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32)
             if parts:
                 parts.append(gap)
             parts.append(seg)
         pcm = np.concatenate(parts)
+        del parts
         audio_s = len(pcm) / SR
 
         # The encoder overshoots by a content-dependent amount, so verify the
         # result and back off until it genuinely fits under full scale.
         target = PEAK_DBFS
+        peak_raw = float(np.abs(pcm).max())
         for _ in range(4):
-            _transcode(_to_wav(_level_and_tail(pcm.copy(), target)), dest, bitrate)
+            _transcode(_to_wav(_level_and_tail(pcm, target, peak_raw)), dest, bitrate)
             peak = _encoded_peak(dest)
             if peak <= 1.0:
                 break
@@ -243,6 +261,8 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="re-render chapters that already exist")
     ap.add_argument("--ort-threads", type=int, default=0,
                     help="cap onnxruntime threads per worker; 0 leaves it to onnxruntime")
+    ap.add_argument("--max-tasks-per-child", type=int, default=15,
+                    help="recycle each worker after N chapters to release memory; 0 disables")
     ap.add_argument("--speaker", type=int, default=None,
                     help="speaker id for multi-speaker voices; becomes part of the cache path")
     args = ap.parse_args()
@@ -300,10 +320,17 @@ def main() -> int:
     total_audio = 0.0
     errors: list[str] = []
 
+    # maxtasksperchild recycles each worker periodically. Pool workers are reused
+    # for hundreds of chapters and Python does not return freed blocks to the OS,
+    # so a worker's footprint ratchets up toward its largest chapter and stays
+    # there -- measured growing from 1.0GB to 2.7GB over ~300 chapters, which
+    # pushed the machine into the pagefile and cost 10-20x on long chapters.
+    # Restarting a worker costs one model load, about 3 seconds.
     with mp.Pool(
         processes=args.workers,
         initializer=_init_worker,
         initargs=(str(voice_path), args.length_scale, args.ort_threads, args.speaker),
+        maxtasksperchild=args.max_tasks_per_child or None,
     ) as pool:
         for book, chapter, audio_s, wall_s, err in pool.imap_unordered(_render, tasks, chunksize=1):
             done += 1

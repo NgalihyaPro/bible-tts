@@ -21,3 +21,4 @@ audio*/
 # so they go stale immediately and are cheap to regenerate.
 corrupt_chapters.json
 corruption_report.json
+en_noise_scan.json
